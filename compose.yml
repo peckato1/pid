@@ -29,13 +29,18 @@ services:
 
   migrate:
     <<: *app
-    command: alembic upgrade head
+    command: ["sh", "-c", "alembic upgrade head && touch /tmp/migrated && exec sleep infinity"]
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       postgis:
         condition: service_healthy
-    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/migrated"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+    restart: unless-stopped
 
   trip-updates:
     <<: *app
@@ -44,7 +49,7 @@ services:
       DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RW_USER}:${APP_POSTGRES_RW_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       migrate:
-        condition: service_completed_successfully
+        condition: service_healthy
     restart: unless-stopped
 
   vehicle-descriptors:
@@ -54,7 +59,7 @@ services:
       DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RW_USER}:${APP_POSTGRES_RW_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       migrate:
-        condition: service_completed_successfully
+        condition: service_healthy
     restart: unless-stopped
 
   api:
@@ -64,7 +69,7 @@ services:
       DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RO_USER}:${APP_POSTGRES_RO_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       migrate:
-        condition: service_completed_successfully
+        condition: service_healthy
     restart: unless-stopped
 
   proxy:
@@ -88,7 +93,7 @@ services:
       - gtfs_archives:/gtfs_archives
     depends_on:
       migrate:
-        condition: service_completed_successfully
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
