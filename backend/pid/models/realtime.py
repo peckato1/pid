@@ -68,6 +68,3 @@ class Vehicle(Base):
     wheelchair_accessible: Mapped[bool | None]
     air_conditioned: Mapped[bool | None]
     usb_chargers: Mapped[bool | None]
-    feed_vehicle_id: Mapped[str | None] = mapped_column(index=True)
-    last_seen_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
-    cache_expires_at: Mapped[datetime.datetime]

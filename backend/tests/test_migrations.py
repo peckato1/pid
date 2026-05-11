@@ -75,3 +75,20 @@ def test_0002_backfills_feed_vehicle_id_from_rt_trip(migrated_engine):
     assert rows[2]["feed_vehicle_id"] is None
     # But cache timestamps are still populated
     assert rows[2]["cache_expires_at"] is not None
+
+
+def test_0003_drops_cache_columns(migrated_engine):
+    engine, url = migrated_engine
+    cfg = _alembic_cfg(url)
+
+    command.upgrade(cfg, "0003")
+
+    with engine.connect() as conn:
+        cols = {
+            r[0] for r in conn.execute(text(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'rt_vehicle'"
+            ))
+        }
+    assert "feed_vehicle_id" not in cols
+    assert "last_seen_at" not in cols
+    assert "cache_expires_at" not in cols

@@ -1,7 +1,6 @@
 import collections
 import datetime
 import logging
-import random
 
 import requests
 from sqlalchemy import or_, select
@@ -29,16 +28,6 @@ TRANSIENT_STATUSES = {0, 429, 500, 502, 503, 504}
 # Route types the per-service endpoint never returns descriptor data for — skip
 # them entirely instead of paying for guaranteed 404 / no_vehicle_descriptor responses.
 SKIP_ROUTE_TYPES = (RouteType.RAIL, RouteType.SUBWAY)
-# Randomized cache TTL range for vehicle descriptors. Each vehicle gets an
-# independently sampled expiry so refreshes spread across the window rather
-# than bunching on a fixed day.
-CACHE_TTL_MIN = datetime.timedelta(days=5)
-CACHE_TTL_MAX = datetime.timedelta(days=10)
-
-
-def _new_expiry(now: datetime.datetime) -> datetime.datetime:
-    jitter = random.uniform(CACHE_TTL_MIN.total_seconds(), CACHE_TTL_MAX.total_seconds())
-    return now + datetime.timedelta(seconds=jitter)
 
 
 def _fetch_service(feed_vehicle_id: str, trip_id: str) -> tuple[int, dict | None]:
@@ -82,7 +71,7 @@ def _get_or_create_operator(session: Session, operator_label: str | None) -> int
     return a.rt_operator_id
 
 
-def _upsert_vehicle(session: Session, vd_data: dict, type_id: int | None, operator_id: int | None, now: datetime.datetime, feed_vehicle_id: str | None = None) -> int | None:
+def _upsert_vehicle(session: Session, vd_data: dict, type_id: int | None, operator_id: int | None) -> int | None:
     # Reg numbers can be re-used after a vehicle is decommissioned, so they're
     # not a unique key. We treat (reg_number + all descriptor fields) as the
     # identity: if every field matches, reuse the row; otherwise insert a new
@@ -103,14 +92,10 @@ def _upsert_vehicle(session: Session, vd_data: dict, type_id: int | None, operat
         .where(*[getattr(Vehicle, k).is_(v) if v is None else getattr(Vehicle, k) == v for k, v in fields.items()])
     ).scalars().first()
     if vehicle is None:
-        vehicle = Vehicle(registration_number=label, feed_vehicle_id=feed_vehicle_id, last_seen_at=now, cache_expires_at=_new_expiry(now), **fields)
+        vehicle = Vehicle(registration_number=label, **fields)
         session.add(vehicle)
         session.flush()
         logger.info("new vehicle reg=%s vehicle_id=%s type=%s operator=%s", label, vehicle.vehicle_id, vd_data.get("vehicle_type"), vd_data.get("operator"))
-    else:
-        vehicle.last_seen_at = now
-        vehicle.cache_expires_at = _new_expiry(now)
-        vehicle.feed_vehicle_id = feed_vehicle_id
     return vehicle.vehicle_id
 
 
@@ -159,35 +144,11 @@ def enrich(session: Session, limit: int | None = None) -> int:
     # the same cycle while we make progress on other candidates.
     queue: collections.deque = collections.deque((tr, 0) for tr in candidates)
     enriched = 0
-    cache_hits = 0
     failures: collections.Counter = collections.Counter()
     processed = 0
     while queue:
         tr, attempts = queue.popleft()
         processed += 1
-
-        if tr.feed_vehicle_id is not None:
-            cached = session.execute(
-                select(Vehicle)
-                .where(Vehicle.feed_vehicle_id == tr.feed_vehicle_id)
-                .where(Vehicle.cache_expires_at > now)
-                .order_by(Vehicle.last_seen_at.desc())
-                .limit(1)
-            ).scalars().first()
-            if cached is not None:
-                cached.last_seen_at = now
-                tr.vehicle_id = cached.vehicle_id
-                cache_hits += 1
-                enriched += 1
-                logger.debug("[%d] trip=%s feed_vehicle=%s -> cache hit vehicle=%s", processed, tr.trip_id, tr.feed_vehicle_id, cached.vehicle_id)
-                try:
-                    session.commit()
-                except Exception as exc:
-                    logger.error("commit failed for trip=%s: %s", tr.trip_id, exc)
-                    session.rollback()
-                    failures["commit_error"] += 1
-                continue
-
         status, data = _fetch_service(tr.feed_vehicle_id, tr.trip_id)
 
         # Transient: requeue up to MAX_REQUEUES, then give up and stamp the failure.
@@ -213,7 +174,7 @@ def enrich(session: Session, limit: int | None = None) -> int:
             else:
                 type_id = _get_or_create_vehicle_type(session, vd_data.get("vehicle_type"))
                 operator_id = _get_or_create_operator(session, vd_data.get("operator"))
-                vehicle_id = _upsert_vehicle(session, vd_data, type_id, operator_id, now, tr.feed_vehicle_id)
+                vehicle_id = _upsert_vehicle(session, vd_data, type_id, operator_id)
                 tr.vehicle_id = vehicle_id
                 tr.origin_route_name = data.get("origin_route_name")
                 tr.run_number = data.get("run_number")
@@ -229,7 +190,7 @@ def enrich(session: Session, limit: int | None = None) -> int:
             session.rollback()
             failures["commit_error"] += 1
 
-    logger.info("cycle done: enriched %d/%d (cache_hits=%d); failures=%s", enriched, total, cache_hits, dict(failures))
+    logger.info("cycle done: enriched %d/%d; failures=%s", enriched, total, dict(failures))
     return total
 
 
