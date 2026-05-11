@@ -3,6 +3,7 @@ import logging
 import time
 
 from pid.proto import gtfs_realtime_OVapi_pb2, gtfs_realtime_pb2
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from pid import golemio
@@ -66,6 +67,9 @@ def sync(session: Session, routes: set[str] | None = None, dry_run: bool = False
     }
     error_samples: list[str] = []
 
+    trip_run_rows: list[dict] = []
+    stop_time_rows: list[dict] = []
+
     for entity in feed.entity:
         if not entity.HasField("trip_update"):
             continue
@@ -101,13 +105,13 @@ def sync(session: Session, routes: set[str] | None = None, dry_run: bool = False
             if dry_run:
                 logger.info("TripRun trip_id=%s route_id=%s start_date=%s feed_vehicle_id=%s schedule_relationship=%s", trip.trip_id, trip.route_id, start_date, feed_vehicle_id, trip.schedule_relationship)
             else:
-                session.merge(TripRun(
-                    trip_id=trip.trip_id,
-                    start_date=start_date,
-                    feed_vehicle_id=feed_vehicle_id,
-                    schedule_relationship=ScheduleRelationship(trip.schedule_relationship),
-                    updated_at=now,
-                ))
+                trip_run_rows.append({
+                    "trip_id": trip.trip_id,
+                    "start_date": start_date,
+                    "feed_vehicle_id": feed_vehicle_id,
+                    "schedule_relationship": ScheduleRelationship(trip.schedule_relationship),
+                    "updated_at": now,
+                })
             counts["trip_runs_written"] += 1
             if feed_vehicle_id:
                 counts["trip_runs_with_vehicle"] += 1
@@ -127,18 +131,18 @@ def sync(session: Session, routes: set[str] | None = None, dry_run: bool = False
                 if dry_run:
                     logger.info("  ActualStopTime seq=%s stop_id=%s arr_delay=%s dep_delay=%s track=%s->%s headsign=%s", stu.stop_sequence, stu.stop_id, arr, dep, track_sched, track_act, headsign)
                 else:
-                    session.merge(ActualStopTime(
-                        trip_id=trip.trip_id,
-                        start_date=start_date,
-                        stop_sequence=stu.stop_sequence,
-                        stop_id=stu.stop_id,
-                        arrival_delay=arr,
-                        departure_delay=dep,
-                        track_scheduled=track_sched,
-                        track_actual=track_act,
-                        headsign=headsign,
-                        updated_at=now,
-                    ))
+                    stop_time_rows.append({
+                        "trip_id": trip.trip_id,
+                        "start_date": start_date,
+                        "stop_sequence": stu.stop_sequence,
+                        "stop_id": stu.stop_id,
+                        "arrival_delay": arr,
+                        "departure_delay": dep,
+                        "track_scheduled": track_sched,
+                        "track_actual": track_act,
+                        "headsign": headsign,
+                        "updated_at": now,
+                    })
                 counts["stop_times_written"] += 1
                 stop_times_for_trip += 1
             logger.debug("trip_id=%s wrote %d stop_times (max_seq=%d)", trip.trip_id, stop_times_for_trip, max_seq)
@@ -150,6 +154,39 @@ def sync(session: Session, routes: set[str] | None = None, dry_run: bool = False
 
     if not dry_run:
         commit_t0 = time.monotonic()
+        # Postgres caps bind parameters at 65535 per statement (16-bit field in
+        # the wire protocol), so chunk so rows_per_chunk * cols stays under.
+        def _chunks(rows, cols, limit=50000):
+            size = max(1, limit // cols)
+            for i in range(0, len(rows), size):
+                yield rows[i:i + size]
+
+        for chunk in _chunks(trip_run_rows, 5):
+            stmt = pg_insert(TripRun).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["trip_id", "start_date"],
+                set_={
+                    "feed_vehicle_id": stmt.excluded.feed_vehicle_id,
+                    "schedule_relationship": stmt.excluded.schedule_relationship,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            session.execute(stmt)
+        for chunk in _chunks(stop_time_rows, 10):
+            stmt = pg_insert(ActualStopTime).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["trip_id", "start_date", "stop_sequence"],
+                set_={
+                    "stop_id": stmt.excluded.stop_id,
+                    "arrival_delay": stmt.excluded.arrival_delay,
+                    "departure_delay": stmt.excluded.departure_delay,
+                    "track_scheduled": stmt.excluded.track_scheduled,
+                    "track_actual": stmt.excluded.track_actual,
+                    "headsign": stmt.excluded.headsign,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            session.execute(stmt)
         session.commit()
         commit_secs = time.monotonic() - commit_t0
     else:
