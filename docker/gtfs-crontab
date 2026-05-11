@@ -1,0 +1,2 @@
+30 4 * * * root . /etc/container_env; cd /app && python pid_gtfs_sync.py --download --if-stale --archive-dir /gtfs_archives > /proc/1/fd/1 2> /proc/1/fd/2
+# trailing newline required by cron

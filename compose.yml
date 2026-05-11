@@ -1,0 +1,85 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-app: &app
+  image: ghcr.io/peckato1/pid:${TAG:-local}
+  build: .
+  env_file: stack.env
+  logging: *default-logging
+
+services:
+  postgis:
+    image: docker.io/postgis/postgis:17-3.5
+    restart: unless-stopped
+    env_file: stack.env
+    ports:
+      - "127.0.0.1:54322:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+
+  migrate:
+    <<: *app
+    command: alembic upgrade head
+    depends_on:
+      postgis:
+        condition: service_healthy
+    restart: "no"
+
+  trip-updates:
+    <<: *app
+    command: python pid_trip_updates.py --interval 45
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  vehicle-descriptors:
+    <<: *app
+    command: python pid_vehicle_descriptors.py
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  api:
+    <<: *app
+    command: python pid_api.py
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  proxy:
+    image: ghcr.io/peckato1/pid-proxy:${TAG:-local}
+    build:
+      context: .
+      dockerfile: docker/proxy.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - api
+    logging: *default-logging
+
+  gtfs-sync:
+    <<: *app
+    command: /usr/local/bin/cron-entrypoint.sh
+    volumes:
+      - gtfs_archives:/gtfs_archives
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgis_data:
+  gtfs_archives:

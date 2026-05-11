@@ -1,0 +1,14 @@
+.git
+.gitignore
+.envrc
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+tmp.sql
+tests
+*.md
+.env
+.env.*
+!.env.example
+gtfs_archives
