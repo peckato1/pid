@@ -7,18 +7,19 @@ x-logging: &default-logging
 x-app: &app
   image: ghcr.io/peckato1/pid:${TAG:-local}
   build: .
-  env_file: stack.env
+  env_file: .env
   logging: *default-logging
 
 services:
   postgis:
     image: docker.io/postgis/postgis:17-3.5
     restart: unless-stopped
-    env_file: stack.env
+    env_file: .env
     ports:
       - "127.0.0.1:54322:5432"
     volumes:
       - postgis_data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-init.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -29,6 +30,8 @@ services:
   migrate:
     <<: *app
     command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       postgis:
         condition: service_healthy
@@ -37,6 +40,8 @@ services:
   trip-updates:
     <<: *app
     command: python pid_trip_updates.py --interval 45
+    environment:
+      DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RW_USER}:${APP_POSTGRES_RW_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -45,6 +50,8 @@ services:
   vehicle-descriptors:
     <<: *app
     command: python pid_vehicle_descriptors.py
+    environment:
+      DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RW_USER}:${APP_POSTGRES_RW_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -53,6 +60,8 @@ services:
   api:
     <<: *app
     command: python pid_api.py
+    environment:
+      DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RO_USER}:${APP_POSTGRES_RO_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -73,6 +82,8 @@ services:
   gtfs-sync:
     <<: *app
     command: /usr/local/bin/cron-entrypoint.sh
+    environment:
+      DATABASE_URL: postgresql+psycopg://${APP_POSTGRES_RW_USER}:${APP_POSTGRES_RW_PASSWORD}@postgis:5432/${APP_POSTGRES_DB}
     volumes:
       - gtfs_archives:/gtfs_archives
     depends_on:
